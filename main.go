@@ -213,7 +213,7 @@ func runDemon(wrapper *workItemClient) {
 	for range time.Tick(time.Second * 5) {
 		query := fmt.Sprintf("SELECT [System.Id] FROM WorkItems "+
 			"WHERE [System.TeamProject] in (%s) "+
-			"AND  [System.CreatedDate] > @Today-1", projects)
+			"AND  [System.ChangedDate] > @Today-1", projects)
 		req, err := wrapper.wiClient.QueryByWiql(wrapper.ctx, wit.QueryByWiqlArgs{
 			Wiql: &wit.Wiql{Query: &query},
 		})
