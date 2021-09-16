@@ -3,11 +3,13 @@ package main
 import (
 	"context"
 	"fmt"
+	"github.com/goccy/go-graphviz/cgraph"
 	"github.com/microsoft/azure-devops-go-api/azuredevops"
 	"regexp"
 	"sort"
 	"strings"
 
+	"github.com/goccy/go-graphviz"
 	//"github.com/microsoft/azure-devops-go-api/azuredevops/search"
 	"github.com/microsoft/azure-devops-go-api/azuredevops/webapi"
 	wit "github.com/microsoft/azure-devops-go-api/azuredevops/workitemtracking"
@@ -22,6 +24,11 @@ const (
 	fieldcompletedWork    = "Microsoft.VSTS.Scheduling.CompletedWork"
 	fieldoriginalEstimate = "Microsoft.VSTS.Scheduling.OriginalEstimate"
 	fieldProject          = "System.TeamProject"
+	relCommit             = "ArtifactLink"
+	relRelated            = "System.LinkTypes.Related"
+	relParent             = "System.LinkTypes.Hierarchy-Reverse"
+	relChild              = "System.LinkTypes.Hierarchy-Forward"
+	fieldWorkItemType     = "System.WorkItemType"
 	stateClose            = "Closed"
 	autor                 = "PARMA\\Lazarenko.AN"
 )
@@ -40,6 +47,7 @@ var (
 	personalAccessToken string
 	projects            string
 	auto                *bool
+	wikey               *int
 )
 
 func init() {
@@ -49,6 +57,7 @@ func init() {
 
 	kp = kingpin.New("TFS", "Автоматизация рутинной работы с TFS")
 	auto = kp.Flag("demon", "ПО будет запущено как demon").Short('d').Bool()
+	wikey = kp.Flag("graph", "построить граф связей WI").Short('g').Int()
 }
 
 func main() {
@@ -66,8 +75,18 @@ func main() {
 
 	kp.Parse(os.Args[1:])
 	wrapper := new(workItemClient).Create(ctx)
+
+	var err error
+	if wrapper.wiClient, err = wit.NewClient(wrapper.ctx, wrapper.connection); err != nil {
+		log.Fatal(err)
+	}
+
 	if *auto {
 		runDemon(wrapper)
+	} else if *wikey > 0 {
+		filePath, _ := generateGraph(wrapper, wikey)
+		fmt.Println(filePath)
+		return
 	}
 
 	if len(os.Args) < 3 {
@@ -279,12 +298,6 @@ func RemoveHtmlTag(in string) string {
 }
 
 func run(wrapper *workItemClient, key, hour int) {
-	var err error
-
-	if wrapper.wiClient, err = wit.NewClient(wrapper.ctx, wrapper.connection); err != nil {
-		log.Fatal(err)
-	}
-
 	wi, _ := wrapper.wiClient.GetWorkItem(wrapper.ctx, wit.GetWorkItemArgs{
 		Id:     &key,
 		Expand: &wit.WorkItemExpandValues.All,
@@ -302,4 +315,106 @@ func run(wrapper *workItemClient, key, hour int) {
 	} else {
 		log.Printf("При копировании wi %q произошла ошибка:\n\t%v\n", key, err)
 	}
+}
+
+func generateGraph(wrapper *workItemClient, wikey *int) (string, error) {
+	g := graphviz.New()
+	graph, err := g.SetLayout(graphviz.DOT).Graph()
+	if err != nil {
+		return "", err
+	}
+	defer func() {
+		graph.Close()
+		g.Close()
+	}()
+
+	generateGraphRecursively(graph, wrapper, wikey)
+
+	//var buf bytes.Buffer
+	//if err := g.Render(graph, "dot", &buf); err != nil {
+	//	log.Fatal(err)
+	//}
+	//fmt.Println(buf.String())
+
+	if err := g.RenderFilename(graph, graphviz.JPG, "C:\\Users\\lazarenko.an\\IdeaProjects\\tfs\\graph.jpg"); err != nil {
+		return "", err
+	}
+
+	return "", nil
+}
+
+func generateGraphRecursively(graph *cgraph.Graph, wrapper *workItemClient, wikey *int) {
+	wi, _ := wrapper.wiClient.GetWorkItem(wrapper.ctx, wit.GetWorkItemArgs{
+		Id:     wikey,
+		Expand: &wit.WorkItemExpandValues.All,
+	})
+	if wi == nil {
+		log.Printf("WI %v не найден\n", *wikey)
+		return
+	}
+
+	createNode := func(name string) (result *cgraph.Node, exists bool) {
+		if result, _ = graph.Node(name); result == nil {
+			result, _ = graph.CreateNode(name)
+			exists = false
+		} else {
+			return result, true
+		}
+
+		result.SetStyle("filled")
+
+		switch strings.ToLower((*wi.Fields)[fieldWorkItemType].(string)) {
+		case "bug":
+			result.SetFillColor("#ff9494")
+		case "issue":
+
+		case "task":
+			result.SetFillColor("#ffcd75")
+		case "requirement":
+			result.SetFillColor("#6666ff")
+		}
+
+		return result, exists
+	}
+
+	main, _ := createNode(strconv.Itoa(*wikey))
+	for i, r := range *wi.Relations {
+		if *r.Rel == relCommit {
+			continue
+		}
+
+		urlsplited := strings.Split(*r.Url, "/")
+		key := urlsplited[len(urlsplited)-1]
+		newwikey, err := strconv.Atoi(key)
+		if err != nil {
+			continue
+		}
+
+		if graph.NumberNodes() > 100 {
+			break
+		}
+
+		var m *cgraph.Node
+		var exists bool
+		if m, exists = createNode(key); !exists {
+			generateGraphRecursively(graph, wrapper, &newwikey)
+		}
+
+		// создаем связь
+		e, err := graph.CreateEdge(fmt.Sprintf("relation_%d", i), main, m)
+		if err != nil {
+			return
+		}
+		switch *r.Rel {
+		case relRelated:
+			e.SetColor("#0000ff")
+		case relParent:
+			e.SetColor("red")
+		case relChild:
+			e.SetColor("#008000")
+		}
+
+		e.SetLabel((*r.Attributes)["name"].(string))
+	}
+
 }
