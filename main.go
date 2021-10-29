@@ -48,6 +48,7 @@ var (
 	projects            string
 	auto                *bool
 	wikey               *int
+	buff                map[*cgraph.Node]int
 )
 
 func init() {
@@ -58,6 +59,8 @@ func init() {
 	kp = kingpin.New("TFS", "Автоматизация рутинной работы с TFS")
 	auto = kp.Flag("demon", "ПО будет запущено как demon").Short('d').Bool()
 	wikey = kp.Flag("graph", "построить граф связей WI").Short('g').Int()
+
+	buff = map[*cgraph.Node]int{}
 }
 
 func main() {
@@ -117,7 +120,10 @@ func (this *workItemClient) Create(ctx context.Context) *workItemClient {
 }
 
 func (this *workItemClient) CopyWorkItem(sourceWI *wit.WorkItem, hour int64) (*wit.WorkItem, error) {
-	sysField := SystemField{"System.State", "System.AssignedTo", "System.Reason", "Microsoft.VSTS.Scheduling.RemainingWork", "Microsoft.VSTS.Common.ActivatedDate", "Microsoft.VSTS.Common.ActivatedBy", fieldcompletedWork, fieldoriginalEstimate}
+	sysField := SystemField{"Microsoft.VSTS.Common.ResolvedReason", "Microsoft.VSTS.Common.ResolvedDate",
+		"Microsoft.VSTS.Common.ResolvedBy", "System.State", "System.AssignedTo", "System.Reason",
+		"Microsoft.VSTS.Scheduling.RemainingWork", "Microsoft.VSTS.Common.ActivatedDate",
+		"Microsoft.VSTS.Common.ActivatedBy", fieldcompletedWork, fieldoriginalEstimate}
 
 	project, _ := (*sourceWI.Fields)["System.TeamProject"].(string)
 	witype, _ := (*sourceWI.Fields)["System.WorkItemType"].(string)
@@ -140,6 +146,9 @@ func (this *workItemClient) CopyWorkItem(sourceWI *wit.WorkItem, hour int64) (*w
 	// переносим связи
 	relPath := "/relations/-"
 	for _, ref := range *sourceWI.Relations {
+		if *ref.Rel == "ArtifactLink" {
+			continue
+		}
 		dao = append(dao, webapi.JsonPatchOperation{
 			Op:   &webapi.OperationValues.Add,
 			Path: &relPath,
@@ -212,6 +221,52 @@ func (this *workItemClient) getComments(wi wit.WorkItem) []wit.Comment {
 	}
 }
 
+func (this *workItemClient) getHours() {
+	query := fmt.Sprintf("SELECT [%s] FROM WorkItems "+
+		"WHERE [System.AssignedTo] = @Me "+
+		"AND [System.ChangedDate] > @StartOfMonth", fieldcompletedWork)
+	req, err := this.wiClient.QueryByWiql(this.ctx, wit.QueryByWiqlArgs{
+		Wiql: &wit.Wiql{Query: &query},
+	})
+	hours := .0
+	if err == nil {
+		Ids := make([]int, 0)
+		for _, wi := range *req.WorkItems {
+			Ids = append(Ids, *wi.Id)
+		}
+
+		wis, err := this.wiClient.GetWorkItems(this.ctx, wit.GetWorkItemsArgs{
+			Ids: &Ids,
+		})
+
+		if err == nil {
+			for _, wi := range *wis {
+				updates, _ := this.wiClient.GetUpdates(this.ctx, wit.GetUpdatesArgs{
+					Id: wi.Id,
+				})
+				fmt.Println(updates)
+
+				h, _ := (*wi.Fields)[fieldcompletedWork].(float64)
+				hours += h
+				fmt.Println(*wi.Id)
+			}
+		}
+	}
+	fmt.Println(hours)
+}
+
+func (this *workItemClient) getHour(html string) (result int) {
+	txt := RemoveHtmlTag(html)
+
+	r := regexp.MustCompile(`[\s]*{([\d]+)}[\s]*`)
+	groups := r.FindAllStringSubmatch(txt, -1)
+	if len(groups) > 0 {
+		result, _ = strconv.Atoi(groups[0][1])
+	}
+
+	return result
+}
+
 func (this SystemField) in(str string) bool {
 	for _, item := range this {
 		if item == str {
@@ -269,18 +324,6 @@ func runDemon(wrapper *workItemClient) {
 	}
 }
 
-func (this *workItemClient) getHour(html string) (result int) {
-	txt := RemoveHtmlTag(html)
-
-	r := regexp.MustCompile(`[\s]*{([\d]+)}[\s]*`)
-	groups := r.FindAllStringSubmatch(txt, -1)
-	if len(groups) > 0 {
-		result, _ = strconv.Atoi(groups[0][1])
-	}
-
-	return result
-}
-
 func RemoveHtmlTag(in string) string {
 	const pattern = `(<\/?[a-zA-A]+?[^>]*\/?>)*`
 	r := regexp.MustCompile(pattern)
@@ -313,7 +356,7 @@ func run(wrapper *workItemClient, key, hour int) {
 			log.Printf("Не удалось закрыть wi %v произошла ошибка:\n\t%v\n", *newWI.Id, err)
 		}
 	} else {
-		log.Printf("При копировании wi %q произошла ошибка:\n\t%v\n", key, err)
+		log.Printf("При копировании wi %d произошла ошибка:\n\t%v\n", key, err)
 	}
 }
 
@@ -343,14 +386,14 @@ func generateGraph(wrapper *workItemClient, wikey *int) (string, error) {
 	return "", nil
 }
 
-func generateGraphRecursively(graph *cgraph.Graph, wrapper *workItemClient, wikey *int) {
+func generateGraphRecursively(graph *cgraph.Graph, wrapper *workItemClient, wikey *int) *cgraph.Node {
 	wi, _ := wrapper.wiClient.GetWorkItem(wrapper.ctx, wit.GetWorkItemArgs{
 		Id:     wikey,
 		Expand: &wit.WorkItemExpandValues.All,
 	})
 	if wi == nil {
 		log.Printf("WI %v не найден\n", *wikey)
-		return
+		return nil
 	}
 
 	createNode := func(name string) (result *cgraph.Node, exists bool) {
@@ -367,9 +410,9 @@ func generateGraphRecursively(graph *cgraph.Graph, wrapper *workItemClient, wike
 		case "bug":
 			result.SetFillColor("#ff9494")
 		case "issue":
-
+			result.SetFillColor("#ffa500")
 		case "task":
-			result.SetFillColor("#ffcd75")
+			result.SetFillColor("#fde910")
 		case "requirement":
 			result.SetFillColor("#6666ff")
 		}
@@ -377,7 +420,10 @@ func generateGraphRecursively(graph *cgraph.Graph, wrapper *workItemClient, wike
 		return result, exists
 	}
 
-	main, _ := createNode(strconv.Itoa(*wikey))
+	main, exists := createNode(strconv.Itoa(*wikey))
+	if exists {
+		return main
+	}
 	for i, r := range *wi.Relations {
 		if *r.Rel == relCommit {
 			continue
@@ -394,17 +440,26 @@ func generateGraphRecursively(graph *cgraph.Graph, wrapper *workItemClient, wike
 			break
 		}
 
-		var m *cgraph.Node
-		var exists bool
-		if m, exists = createNode(key); !exists {
-			generateGraphRecursively(graph, wrapper, &newwikey)
+		m := generateGraphRecursively(graph, wrapper, &newwikey)
+		if m == nil {
+			continue
 		}
+
+		//var m *cgraph.Node
+		//var exists bool
+		//if m, exists = createNode(key); !exists {
+		//	generateGraphRecursively(graph, wrapper, &newwikey)
+		//}
 
 		// создаем связь
 		e, err := graph.CreateEdge(fmt.Sprintf("relation_%d", i), main, m)
 		if err != nil {
-			return
+			return nil
 		}
+
+		buff[main]++
+		//m.SetComment(fmt.Sprintf("%d (%d)", *wikey, buff[m]))
+
 		switch *r.Rel {
 		case relRelated:
 			e.SetColor("#0000ff")
@@ -417,4 +472,5 @@ func generateGraphRecursively(graph *cgraph.Graph, wrapper *workItemClient, wike
 		e.SetLabel((*r.Attributes)["name"].(string))
 	}
 
+	return main
 }
