@@ -123,7 +123,7 @@ func (this *workItemClient) CopyWorkItem(sourceWI *wit.WorkItem, hour int64) (*w
 	sysField := SystemField{"Microsoft.VSTS.Common.ResolvedReason", "Microsoft.VSTS.Common.ResolvedDate",
 		"Microsoft.VSTS.Common.ResolvedBy", "System.State", "System.AssignedTo", "System.Reason",
 		"Microsoft.VSTS.Scheduling.RemainingWork", "Microsoft.VSTS.Common.ActivatedDate",
-		"Microsoft.VSTS.Common.ActivatedBy", fieldcompletedWork, fieldoriginalEstimate}
+		"Microsoft.VSTS.Common.ActivatedBy", "Microsoft.VSTS.Common.ClosedBy", "Microsoft.VSTS.Common.ClosedDate", fieldcompletedWork, fieldoriginalEstimate}
 
 	project, _ := (*sourceWI.Fields)["System.TeamProject"].(string)
 	witype, _ := (*sourceWI.Fields)["System.WorkItemType"].(string)
